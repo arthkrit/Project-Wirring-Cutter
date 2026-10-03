@@ -1,7 +1,7 @@
 ﻿/* 
   WirringCutter - DIY Arduino Wire Feeder + Cutter
  *
- * เวอร์ชันนี้: สเต็ปป้อนลวด + สเต็ปตัดลวด (2 motors) เลือกความยาว/จำนวนด้วยปุ่มกด 6 ปุ่ม + LCD I2C
+ * เวอร์ชันนี้: สเต็ปป้อนลวด + สเต็ปตัดลวด (2 motors) เลือกความยาว/จำนวนด้วยปุ่มกด 5 ปุ่ม + LCD I2C
  *
  * Required libraries (ติดตั้งใน Arduino IDE ก่อนคอมไพล์):
  *   - StepperDriver by laurb9         -> BasicStepperDriver.h
@@ -13,14 +13,13 @@
  * Board: Arduino Uno (Mega/Nano ได้)
  *
  * ===== Pinout =====
- *  Stepper X (ป้อนลวด): DIR=12, STEP=13
- *  Stepper Y (ตัดลวด):  DIR=10, STEP=11
+ *  Stepper X (ป้อนลวด): DIR=10, STEP=11
+ *  Stepper Y (ตัดลวด):  DIR=8,  STEP=9
  *  LCD I2C 16x2:        SDA=A4, SCL=A5, VCC=5V, GND=GND
- *  ปุ่ม 6 ตัว (INPUT_PULLUP, อีกด้านต่อ GND):
- *    UP    = ขา 2
- *    DOWN  = ขา 3
- *    NEXT  = ขา 4
- *    BACK  = ขา 5
+ *  ปุ่ม 5 ตัว (INPUT_PULLUP, อีกด้านต่อ GND):
+ *    UP    = ขา 3
+ *    DOWN  = ขา 4
+ *    NEXT  = ขา 5
  *    START = ขา 6
  *    RESET = ขา 7
  */
@@ -31,23 +30,23 @@
 #include <LiquidCrystal_I2C.h>
 
 // ===== Motor =====
-#define MOTOR_STEPS_X 200
-#define DIR_X         12
-#define STEP_X        13
+#define MOTOR_STEPS_X 4000
+#define DIR_X         10
+#define STEP_X        11
 #define MICROSTEPS_X  16
 #define MOTOR_X_RPM   50
 
-#define MOTOR_STEPS_Y 3200
-#define DIR_Y         10
-#define STEP_Y        11
+// ===== Cutter =====
+#define MOTOR_STEPS_Y 200
+#define DIR_Y         8
+#define STEP_Y        9
 #define MICROSTEPS_Y  16
 #define MOTOR_Y_RPM   50
 
 // ===== Buttons (INPUT_PULLUP) =====
-#define BTN_UP        2
-#define BTN_DOWN      3
-#define BTN_NEXT      4
-#define BTN_BACK      5
+#define BTN_UP        3
+#define BTN_DOWN      4
+#define BTN_NEXT      5
 #define BTN_START     6
 #define BTN_RESET     7
 
@@ -59,16 +58,15 @@
 #define LENGTH_MIN_CM      1
 #define LENGTH_MAX_CM      200
 #define COUNT_MAX          9999
-#define CUTTER_STEPS       200    // จำนวนสเต็ปต่อการตัด 1 ครั้ง (ปรับให้ตรงเครื่องจริง)
+#define CUTTER_STEPS       6400    // จำนวนสเต็ปต่อการตัด 1 ครั้ง (ปรับให้ตรงเครื่องจริง)
 
 // ===== ลำดับปุ่มในอาร์เรย์ (สำหรับฟังก์ชัน getPressedButton) =====
-const int BTN_PINS[6] = { BTN_UP, BTN_DOWN, BTN_NEXT, BTN_BACK, BTN_START, BTN_RESET };
+const int BTN_PINS[5] = { BTN_UP, BTN_DOWN, BTN_NEXT, BTN_START, BTN_RESET };
 #define IDX_UP      0
 #define IDX_DOWN    1
 #define IDX_NEXT    2
-#define IDX_BACK    3
-#define IDX_START   4
-#define IDX_RESET   5
+#define IDX_START   3
+#define IDX_RESET   4
 
 // ===== Menu state =====
 enum MenuPage { PAGE_LENGTH, PAGE_COUNT };
@@ -93,14 +91,14 @@ BasicStepperDriver stepperY(MOTOR_STEPS_Y, DIR_Y, STEP_Y);
 LiquidCrystal_I2C lcd(0x27, 16, 2);   // ถ้าจอไม่ขึ้น ลองเปลี่ยน 0x27 -> 0x3F
 
 // ===== สถานะปุ่มครั้งก่อน (สำหรับ edge detection) =====
-bool lastBtnState[6] = { HIGH, HIGH, HIGH, HIGH, HIGH, HIGH };
+bool lastBtnState[5] = { HIGH, HIGH, HIGH, HIGH, HIGH };
 
 
 void setup() {
   Serial.begin(9600);
 
   // ตั้งขาปุ่มเป็น INPUT_PULLUP (กด = LOW, ปล่อย = HIGH)
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < 5; i++) {
     pinMode(BTN_PINS[i], INPUT_PULLUP);
   }
 
@@ -117,16 +115,28 @@ void setup() {
 void loop() {
   int btn = getPressedButton();
 
-  // RESET มี priority สูงสุด — หยุดได้ทุกเมื่อ
+  // RESET มี priority สูงสุด — หยุดได้ทุกเมื่อ + คืนค่าทุกอย่างเป็นค่าเริ่มต้น
   if (btn == IDX_RESET) {
     running = false;
     piecesDone = 0;
     currentOp = OP_IDLE;
+    wireLength = LENGTH_MIN_CM;   // กลับเป็น 1 cm
+    pieceCount = 1;               // กลับเป็น 1 ชิ้น
+    currentPage = PAGE_LENGTH;    // กลับหน้าเมนู LENGTH
     updateLCD();
     return;
   }
 
   if (running) {
+    // START กดซ้ำระหว่างทำงาน = หยุด (stop)
+    if (btn == IDX_START) {
+      running = false;
+      piecesDone = 0;
+      currentOp = OP_IDLE;
+      updateLCD();
+      return;
+    }
+
     if (currentOp == OP_IDLE) {
       currentOp = OP_FEEDING;
       updateLCD();
@@ -149,8 +159,8 @@ void loop() {
 
   // ===== โหมดตั้งค่า =====
 
-  // NEXT/BACK: สลับเมนู LENGTH <-> COUNT
-  if (btn == IDX_NEXT || btn == IDX_BACK) {
+  // NEXT: สลับเมนู LENGTH <-> COUNT (กดซ้ำไป-กลับ)
+  if (btn == IDX_NEXT) {
     currentPage = (currentPage == PAGE_LENGTH) ? PAGE_COUNT : PAGE_LENGTH;
     updateLCD();
   }
@@ -159,7 +169,7 @@ void loop() {
     if (btn == IDX_UP) {
       wireLength += LENGTH_STEP_CM;
       if (wireLength > LENGTH_MAX_CM) wireLength = LENGTH_MAX_CM;
-      updateLCD();  
+      updateLCD();
     } else if (btn == IDX_DOWN) {
       wireLength -= LENGTH_STEP_CM;
       if (wireLength < LENGTH_MIN_CM) wireLength = LENGTH_MIN_CM;
@@ -177,7 +187,7 @@ void loop() {
     }
   }
 
-  // START: เริ่มตัดต่อเนื่อง pieceCount ชิ้น
+  // START: (ขณะไม่ได้ทำงาน) เริ่มงานใหม่ นับชิ้นที่ 1 ใหม่เสมอ
   if (btn == IDX_START) {
     piecesDone = 0;
     currentOp = OP_IDLE;
@@ -192,7 +202,7 @@ void loop() {
 // =========================================================
 int getPressedButton() {
   int result = -1;
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < 5; i++) {
     bool cur = (digitalRead(BTN_PINS[i]) == LOW);
     if (cur && !lastBtnState[i]) {
       result = i;   // ตรวจพบขอบลง (เพิ่งกด)
